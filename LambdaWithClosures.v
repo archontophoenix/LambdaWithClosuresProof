@@ -18,14 +18,37 @@ capture.)
 
 The goal here is to come up with a machine-checked proof that a call-by-value
 untyped lambda calculus with closures is equivalent to one with term rewriting.
+
+The small-step implementation of the closure-valued calculus used here is in the
+style of an SECD machine, a technique originally described by Peter Landin in
+1963 (more details appear at the start of the SECD section below). That means
+that the goal is, more precisely, a proof that an SECD machine implements the
+semantics of the term-rewriting call-by-value lambda calculus.
+
+The interesting proofs below use small-step inductive type definitions for both
+the term-rewriting calculus and the SECD machines, but this file also includes
+the corresponding big-step definitions. The latter are generally more concise
+than the small-step definitions, and so may be easier for a human reader to
+understand, but are far less tractable in proofs, which often need to refer to
+intermediate reduction steps that a big-step definition provides no way to
+construct.
 *******************************************************************************)
 
+(* Imports from the standard library for Coq 8.4p16 *)
+
+Require Import Coq.Lists.List.
 Require Import Coq.Vectors.Vector.
 
 Definition Vec (A: Type) (n: nat): Type := VectorDef.t A n.
 Definition Fin (n: nat): Set := Fin.t n.
-Notation "[]" := (nil _).
-Notation "h :: t" := (cons _ h _ t) (at level 60, right associativity).
+Notation "[]" := (VectorDef.nil _).
+Notation "[+]" := (List.nil).
+Notation "h :: t" :=
+  (VectorDef.cons _ h _ t) (at level 60, right associativity).
+Notation "h +: t" := (List.cons h t) (at level 60, right associativity).
+
+Require Import Coq.Logic.EqdepFacts.
+Require Import Coq.Program.Equality.
 
 (* Basic definitions **********************************************************)
 
@@ -46,6 +69,26 @@ Fixpoint beq_nat (n m: nat): bool :=
   | S _, 0 => false
   | S n', S m' => beq_nat n' m'
   end.
+
+(* Relations and multistep relations (see Software Foundations, Smallstep.v) **)
+
+Definition relation (X: Type) := X -> X -> Prop.
+
+Definition deterministic {X: Type} (R: relation X) :=
+  forall x y1 y2 : X, R x y1 -> R x y2 -> y1 = y2.
+
+Definition finalState {X: Type} (R: relation X) (x: X) :=
+  ~ exists x', R x x'.
+
+Inductive multi {X:Type} (R: relation X) : relation X :=
+  | multi_refl  : forall (x : X), multi R x x
+  | multi_step : forall (x y z : X),
+                    R x y ->
+                    multi R y z ->
+                    multi R x z.
+
+Definition fullReduce {X: Type} (R: relation X) (startX endX: X) :=
+  multi R startX endX /\ finalState R endX.
 
 (* Contexts *******************************************************************)
 
@@ -72,7 +115,7 @@ Proof. reflexivity. Qed.
 
 (* Whether a program is closed in a given context -- that is, has no unbound
    variables *)
-Inductive Closed (len: nat): Ctx len -> Exp -> Prop :=
+Inductive Closed (len: nat): Ctx len -> Exp -> Type :=
   | CVar {n: nat} {pos: Fin len} {ctx: Ctx len}:
       lookUp n ctx = Some pos ->
       Closed len ctx (Var n)
@@ -96,9 +139,10 @@ Proof.
   assert (H: lookUp 1 (1 :: []) = Some (Fin.F1)). { reflexivity. }
   eapply CVar. apply H.
 Qed.
-Example notClosed: ~ ClosedTerm (Lam 1 (Var 2)).
+Example notClosed: ClosedTerm (Lam 1 (Var 2)) -> False.
 Proof.
-  intros Contra. inversion Contra. inversion H1. inversion H5.
+  intros Contra. inversion Contra. inversion X; subst. simpl in H4.
+  inversion H4.
 Qed.
 
 (* Symbolic exeuction *********************************************************)
@@ -127,7 +171,27 @@ Proof.
   constructor. intros Contra; inversion Contra.
 Qed.
 
-(* Big-step symbolic reduction. *)
+Lemma SubstDeterministic: forall (e targ res0 res1: Exp) (x: nat),
+  Subst e x targ res0 -> Subst e x targ res1 -> res0 = res1.
+Proof.
+  assert (VarContra: forall n: nat, n <> n -> False). {
+    intros n Contra. assert (H: n = n). { reflexivity. }
+    apply Contra in H. assumption.
+  }
+  intros e targ res0 res1 x H0 H1. generalize dependent res1.
+  induction H0; intros res1 H1; inversion H1; subst; try reflexivity.
+  - apply VarContra in H0. contradiction.
+  - apply VarContra in H. contradiction.
+  - apply VarContra in H2. contradiction.
+  - apply VarContra in H. contradiction.
+  - apply IHSubst in H6; subst. reflexivity.
+  - apply IHSubst1 in H2. apply IHSubst2 in H4. subst. reflexivity.
+Qed.
+
+(* Big-step symbolic reduction ************************************************)
+(* Big-step reduction is hard to work with ************************************)
+(* Instead, we'll use small-step version below ********************************)
+
 Inductive SymReduce: Exp -> Exp -> Prop :=
   | SRLam {n: nat} {body: Exp}:  (* functions are fully reduced values *)
       SymReduce (Lam n body) (Lam n body)
@@ -149,8 +213,55 @@ Example notReduceVar:
 Proof.
   intros Contra. inversion Contra. inversion H.
 Qed.
+Example notReduceInfinite:
+  ~ (exists result,
+      SymReduce
+        (App (Lam 0 (App (Var 0) (Var 0))) (Lam 0 (App (Var 0) (Var 0))))
+        result).
+Abort. (* Can't figure out how to prove this with big-step reduction. *)
 
-(* Execution with explicit substitutions and de Bruijn indices ****************)
+(* Small-step symbolic reduction **********************************************)
+
+Reserved Notation " t '$=>' t' " (at level 40).
+
+(* Lams are fully reduced values; only Apps are reducible (unbound Vars are
+   illegal and cannot occur in a closed program) *)
+Inductive SymStep: Exp -> Exp -> Prop :=
+  | SSAppL {fncL argL eL' eR: Exp}:
+      App fncL argL $=> eL' ->
+      App (App fncL argL) eR $=> App eL' eR
+  | SSAppR {n: nat} {body fncR argR eR'}:
+      App fncR argR $=> eR' ->
+      App (Lam n body) (App fncR argR) $=> App (Lam n body) eR'
+  | SSSubst {r l: nat} {bodyR bodyL result: Exp}:
+      Subst (Lam r bodyR) l bodyL result ->
+      App (Lam l bodyL) (Lam r bodyR) $=> result
+
+where " t '$=>' t' " := (SymStep t t').              
+
+Example symStepId:
+  App (Lam 0 (Var 0)) (Lam 1 (Var 1)) $=> Lam 1 (Var 1).
+Proof.
+  constructor. constructor.
+Qed.
+Example notStepVar:
+  ~ exists p, Var 0 $=> p.
+Proof.
+  intros Contra. inversion Contra. inversion H.
+Qed.
+
+Theorem SymStepDeterministic: deterministic SymStep.
+Proof.
+  unfold deterministic. intros. generalize dependent y2.
+  induction H; intros.
+  - inversion H0; subst. apply IHSymStep in H5; subst. reflexivity.
+  - inversion H0; subst. apply IHSymStep in H6; subst. reflexivity.
+  - inversion H0; subst. eapply SubstDeterministic.
+    + apply H.
+    + apply H6.
+Qed.
+
+(* DeBruijnization: replacement of symbolic variable names with indices *******)
 
 (* DeBruijnized expression, with context depth at each point *)
 Inductive Dxp (depth: nat): Set :=
@@ -184,6 +295,25 @@ Proof.
   - constructor. constructor. reflexivity.
 Qed.
 
+Lemma debruijnizable: forall (e: Exp) (ct: ClosedTerm e),
+  {d: Dxp 0 | DeBruijnize 0 [] e d}.
+Proof.
+  unfold ClosedTerm. intros e C. induction C.
+  - exists (DVar len pos). constructor. assumption.
+  - inversion IHC. exists (DLam len x). constructor. assumption.
+  - inversion IHC1. inversion IHC2.
+    exists (DApp len x x0). constructor.
+    + assumption.
+    + assumption.
+Qed.
+
+Definition deBruijnized (e: Exp) (ct: ClosedTerm e): Dxp 0 :=
+  match debruijnizable e ct with
+  | exist d _ => d
+  end.
+
+(* Closures and environments **************************************************)
+
 (* A closure: a term and and environment of closure values in which to evaluate
    the term. The term is always a function body expecting one more arugment, so
    the body has depth one greater than the environment provided *)
@@ -192,6 +322,10 @@ Inductive Clo: Type :=
 
 (* An environment of closure values *)
 Definition Env (depth: nat): Type := Vec Clo depth.
+
+(* Big-step reduction of deBruijnized terms with closures *********************)
+(* Big-step reduction is hard to work with ************************************)
+(* Instead, we'll use small-step version below ********************************)
 
 (* Big-step reduction with closures *)
 Inductive CloReduce (depth: nat) (env: Env depth): Dxp depth -> Clo -> Prop :=
@@ -223,26 +357,224 @@ Proof.
   - constructor.
 Qed.
 
-Lemma debruijnizable: forall (e: Exp) (ct: ClosedTerm e),
-  {d: Dxp 0 | DeBruijnize 0 [] e d}.
+(* Small-step reduction of deBruijnized terms in SECD style *******************)
+
+(*******************************************************************************
+The SECD machine implementation here is loosely based on Olivier Danvy's "A
+Rational Deconstruction of Landin's SECD Machine"
+(http://ojs.statsbiblioteket.dk/index.php/brics/article/download/21801/19232).
+
+The SECD machine is named for the four components of its state:
+
+. Stack: a stack of temporary values, local to the current function. The
+  elements of this stack are closures (Clo), because all values are closures.
+
+. Environment: a stack of bindings (closures) for the variables (that is,
+  parameters for enclosing functions) visible at this point in the program. The
+  topmost binding is for the innermost enclosing function's parameter, with
+  successive entries farther down the stack, so that entries in the environment
+  are looked up by their deBruijn indices.
+
+. Control: a stack of instructions for the current function. An instruction is
+  either a lambda calculus term, or the special instruction Apply, which is used
+  to keep track of which Stack values represent functions and which represent
+  arguments. The next instruction to execute is the top element of Control.
+
+. Dump: a stack of (Stack,Environment,Control) triples, used to save and restore
+  the state when making a function call.
+
+One might have wished for a better nomenclature. For example, why is one
+state componenent called Stack, when they are all in fact stacks? Furthermore,
+dispatch is based on the top element of Control -- wouldn't it read better if
+Control were first, since that's what you look at first? Ah well, that's the
+burden of tradition.
+
+An SECD machine run in an empty environment on a closed program in our lambda
+calculus can be in one of six states, mostly distinguished by the top element of
+Control. Here are the states and the actions taken in each; unless otherwise
+noted, each action first pops off the top instruction from Control:
+
+. Var next: look up the variable in Environment and push the result on Stack.
+
+. Lam next: wrap the lambda in a closure and push the result on Stack.
+
+. App next: push (in reverse order) the function and argument parts of App and
+  the special instruction Apply onto Control. This will (eventually, if
+  evaluation terminates) cause the machine to evaluate the function and argument
+  and push each onto Stack in preparation for a function call.
+
+. Apply next: call the function whose closure is the next-to-top element of
+  Stack; the function's argument is the top element of Stack. This entails
+  pushing the current (Stack,Environment,Control) onto Dump, and setting
+  Stack, Environment, and Control, respectively, to empty, the function argument
+  pushed onto the environment part of the function closure, and the body of the
+  function.
+
+. Empty Control, nonempty Dump: return from the current function. There is a
+  single item R (the function's return value) on Stack. Restore the old Stack,
+  Environment, and Control from Dump, then push R onto Stack.
+
+. Empty Control, empty Dump: this is the terminal state of a program. There is a
+  single item, the program's result, on Stack. No step is possible from this
+  state, which is why SECDStep below has only 5 constructors, not 6.
+*******************************************************************************)
+
+(* An instruction is a deBruijnized lambda calculus term or Apply *)
+Inductive Instruction (depth: nat) :=
+  | IDxp: Dxp depth -> Instruction depth
+  | Apply: Instruction depth.
+
+(* SECD state component definitions *)
+Definition Stack := list Clo.
+Definition Environment := Env.
+Definition Control (depth: nat) := list (Instruction depth).
+(* A (Stack,Environment,Control) triple. Can't be expressed as a simple product
+   because of the dependency: the environment depths for the Environment and
+   Control components must match  *)
+Inductive SEC: Type :=
+  | Sec {depth: nat}: Stack -> Env depth -> Control depth -> SEC.
+Definition Dump := list SEC.
+
+(* A complete SECD state is a (Stack,Environment,Control) triple plus Dump *)
+Inductive SECD: Type :=
+  | Secd: SEC -> Dump -> SECD.
+
+Reserved Notation " t '%=>' t' " (at level 40).
+
+(* A single step of the SECD machine *)
+Inductive SECDStep: SECD -> SECD -> Prop :=
+  (* Var next *)
+  | LookUpVar {s: Stack} {depth: nat} {e: Env depth} {index: Fin depth}
+        {clo: Clo} {c: Control depth} {d: Dump}:
+      nth e index = clo ->
+      Secd (Sec s e (IDxp depth (DVar depth index) +: c)) d %=>
+        Secd (Sec (clo +: s) e c) d
+  (* Lam next *)
+  | LamToClosure {s: Stack} {depth: nat} {e: Env depth} {body: Dxp (S depth)}
+        {c: Control depth} {d: Dump}:
+      Secd (Sec s e (IDxp depth (DLam depth body) +: c)) d %=>
+        Secd (Sec ((EClo depth body e) +: s) e c) d
+  (* App next *)
+  | AppToApply {s: Stack} {depth: nat} {e: Env depth} {fnc arg: Dxp depth}
+        {c: Control depth} {d: Dump}:
+      Secd (Sec s e (IDxp depth (DApp depth fnc arg) +: c)) d %=>
+        Secd (Sec s e (IDxp depth fnc +: IDxp depth arg +: Apply depth +: c)) d
+  (* Apply next *)
+  | CallFunction {arg: Clo} {cloDepth depth: nat} {cloBody: Dxp (S cloDepth)}
+        {cloEnv: Env cloDepth} {s: Stack} {e: Env depth} {c: Control depth}
+        {d: Dump}:
+      Secd
+        (Sec (arg +: EClo cloDepth cloBody cloEnv +: s) e (Apply depth +: c))
+        d
+          %=>
+      Secd
+        (Sec [+] (arg :: cloEnv) (IDxp (S cloDepth) cloBody +: [+]))
+        ((Sec s e c) +: d)
+  (* Empty Control, nonempty Dump *)
+  | ReturnFromFunction
+        {rtnVal: Clo} {curDepth oldDepth: nat} {e: Env curDepth}
+        {oldS: Stack} {oldE: Env oldDepth} {oldC: Control oldDepth}
+        {oldD: Dump}:
+      Secd (Sec (rtnVal +: [+]) e [+]) ((Sec oldS oldE oldC) +: oldD) %=>
+        Secd (Sec (rtnVal +: oldS) oldE oldC) oldD
+        
+where " t '%=>' t' " := (SECDStep t t').
+
+Definition idBody: Dxp 1 := DVar 1 Fin.F1. (* Body of identity function *)
+Definition id: Dxp 0 := DLam 0 idBody. (* Identity function id *) 
+Definition applyIdToId: Dxp 0 := DApp 0 id id. (* id id *)
+Definition instrId: Instruction 0 := IDxp 0 id. (* id as instruction *)
+Definition cloId: Clo := EClo 0 idBody []. (* id as closure *)
+Example SECDStepIdId0:
+  Secd (Sec [+] [] (IDxp 0 applyIdToId +: [+])) [+]
+    %=>
+  Secd (Sec [+] [] (instrId +: instrId +: Apply 0 +: [+])) [+].
+Proof. apply AppToApply. Qed.
+Example SECDStepIdId1:
+  Secd (Sec [+] [] (instrId +: instrId +: Apply 0 +: [+])) [+]
+    %=>
+  Secd (Sec (cloId +: [+]) [] (instrId +: Apply 0 +: [+])) [+].
+Proof. apply LamToClosure. Qed.
+Example SECDStepIdId2:
+  Secd (Sec (cloId +: [+]) [] (instrId +: Apply 0 +: [+])) [+]
+    %=>
+  Secd (Sec (cloId +: cloId +: [+]) [] (Apply 0 +: [+])) [+].
+Proof. apply LamToClosure. Qed.
+Example SECDStepIdId3:
+  Secd (Sec (cloId +: cloId +: [+]) [] (Apply 0 +: [+])) [+]
+    %=>
+  Secd (Sec [+] (cloId :: []) (IDxp 1 idBody +: [+])) (Sec [+] [] [+] +: [+]).
+Proof. apply CallFunction. Qed.
+Example SECDStepIdId4:
+  Secd (Sec [+] (cloId :: []) (IDxp 1 idBody +: [+])) (Sec [+] [] [+] +: [+])
+    %=>
+  Secd (Sec (cloId +: [+]) (cloId :: []) [+]) (Sec [+] [] [+] +: [+]).
+Proof. apply LookUpVar. reflexivity. Qed.
+Example SECDStepIdId5:
+  Secd (Sec (cloId +: [+]) (cloId :: []) [+]) (Sec [+] [] [+] +: [+])
+    %=>
+  Secd (Sec (cloId +: [+]) [] [+]) [+].
+Proof. apply ReturnFromFunction. Qed.
+Example SECDStepIdIdDone:
+  ~ exists x, Secd (Sec (cloId +: [+]) [] [+]) [+] %=> x.
+Proof.
+  intros Contra. inversion Contra. inversion H.
+Qed.
+
+(* Thanks to John Wiegley and John Major: *)
+Lemma dependentSame: forall {A: Type} (P: A -> Type) (x: A) (p0 p1: P x),
+  existT P x p0 = existT P x p1 -> p0 = p1.
+Proof.
+  intros. apply eq_sigT_eq_dep in H. dependent destruction H. reflexivity.
+Qed.
+
+Theorem SECDStepDeterministic: deterministic SECDStep.
+Proof.
+  unfold deterministic. intros. generalize dependent y2.
+  induction H; intros; try (inversion H0; subst).
+  - apply dependentSame in H4. apply dependentSame in H5.
+    apply dependentSame in H6. subst. reflexivity.
+  - apply dependentSame in H3. apply dependentSame in H4.
+    apply dependentSame in H5. subst. reflexivity.
+  - apply dependentSame in H3. apply dependentSame in H4.
+    apply dependentSame in H5. apply dependentSame in H6.
+    subst. reflexivity.
+  - apply dependentSame in H4. apply dependentSame in H5.
+    apply dependentSame in H7. apply dependentSame in H8.
+    subst. reflexivity.
+  - apply dependentSame in H3. apply dependentSame in H6.
+    apply dependentSame in H7. subst. reflexivity.
+Qed.
+
+(* A closed deBruijnized lamba term in an empty environment, ready to run *)
+Definition runnableProgram (e: Exp) (ct: ClosedTerm e): SECD :=
+  Secd (Sec [+] [] (IDxp 0 (deBruijnized e ct) +: [+])) [+].
+
+(* Fully reducing a closed term always yields a one-item Stack, empty Control,
+   and empty Dump *)
+Lemma SECDFinalState: forall {depth: nat}
+    (e: Exp) (ct: ClosedTerm e) (st: Stack) (env: Env depth)
+    (ctrl: Control depth) (dmp: Dump),
+  fullReduce SECDStep (runnableProgram e ct) (Secd (Sec st env ctrl) dmp) ->
+    (length st = 1 /\ ctrl = [+] /\ dmp = [+]).
 Admitted.
 
-Definition deBruijnized (e: Exp) (ct: ClosedTerm e): Dxp 0 :=
-  match debruijnizable e ct with
-  | exist d _ => d
-  end.
+(* The goal *******************************************************************)
 
-(* One possible notion of equivalence: symbolic and closure-based reduction each
-   converge when the other does. *)
-Theorem ClosuresReduceWhenSymbolicExecutionReduces:
-  forall (e e': Exp) (ct: ClosedTerm e) (clo: Clo),
-    SymReduce e e' <-> CloReduce 0 [] (deBruijnized e ct) clo.
+(* Symbolic execution should terminate iff SECD execution terminates *)
+Theorem termRewriteTerminatesIffSECDTerminates:
+  forall (e: Exp) (ct: ClosedTerm e),
+    (exists e', fullReduce SymStep e e') <->
+      (exists secd', fullReduce SECDStep (runnableProgram e ct) secd').
 Admitted.
 
-(* A stronger statement that deBruijnizing the result of symbolic execution gets the
-   same result as executing the original term with closures. *)
-Theorem ClosuresReduceToTheSameThingAsSymbolicExecution:
-  forall (e e': Exp) (ct: ClosedTerm e) (clo clo': Clo),
-    SymReduce e e' -> CloReduce 0 [] (deBruijnized e ct) clo ->
-    {d': Dxp 0 | DeBruijnize 0 [] e' d' & CloReduce 0 [] d' clo}.
+(* If execution terminates, then running before deBruijnizing should yield the
+   same result as deBruijnizing before running *)
+Theorem termRewriteEquivSECD: forall {depth: nat}
+    (e e': Exp) (ct: ClosedTerm e) (st: Stack) (env: Env depth)
+    (ctrl: Control depth) (dmp: Dump) (body: Dxp 1),
+  fullReduce SymStep e e' ->
+  fullReduce SECDStep (runnableProgram e ct) (Secd (Sec st env ctrl) dmp) ->
+  DeBruijnize 0 [] e' (DLam 0 body) -> (* TODO: show this always holds! *)
+  st = (EClo 0 body []) +: [+].
 Admitted.
