@@ -79,7 +79,7 @@ Definition deterministic {X: Type} (R: relation X) :=
 
 Definition finalState {X: Type} (R: relation X) (x: X) :=
   ~ exists x', R x x'.
-
+                     
 Inductive multi {X:Type} (R: relation X) : relation X :=
   | multi_refl  : forall (x : X), multi R x x
   | multi_step : forall (x y z : X),
@@ -87,8 +87,123 @@ Inductive multi {X:Type} (R: relation X) : relation X :=
                     multi R y z ->
                     multi R x z.
 
+Theorem multi_R: forall (X: Type) (R: relation X) (x y: X),
+  R x y -> multi R x y.
+Proof.
+  intros. eapply multi_step.
+  - apply H.
+  - apply multi_refl.
+Qed.
+
+Theorem multi_trans: forall (X: Type) (R: relation X) (x y z: X),
+  multi R x y -> multi R y z -> multi R x z.
+Proof.
+  intros. induction H.
+  - assumption.
+  - apply IHmulti in H0. eapply multi_step.
+    + apply H.
+    + assumption.
+Qed.
+
+Theorem multi_step': forall (X: Type) (R: relation X) (x y z: X),
+  multi R x y -> R y z -> multi R x z.
+Proof.
+  intros. induction H.
+  - eapply multi_step.
+    + apply H0.
+    + apply multi_refl.
+  - apply IHmulti in H0. eapply multi_step.
+    + apply H.
+    + assumption.
+Qed.
+
+Theorem first_step__last_step: forall (X: Type) (R: relation X) (x y z: X),
+  R x y -> multi R y z -> exists y', multi R x y' /\ R y' z.
+Proof.
+  intros. generalize dependent x. induction H0.
+  - intros. exists x0. split.
+    + eapply multi_refl.
+    + assumption.
+  - intros. apply IHmulti in H. inversion H. inversion H2. exists x1. split.
+    + eapply multi_step.
+      * apply H1.
+      * assumption.
+    + assumption.
+Qed.
+
+Lemma deterministicStepOrdering1: forall (X: Type) (R: relation X) (x y z: X),
+  deterministic R -> R x y -> multi R x z ->
+    (z = x \/ multi R y z).
+Proof.
+  unfold deterministic. intros. induction H1.
+  - left. reflexivity.
+  - apply (H x y y0 H0) in H1. subst. induction H2.
+    + right. apply multi_refl.
+    + right. eapply multi_step.
+      * apply H1.
+      * assumption.
+Qed.
+
+Theorem deterministicStepOrdering: forall (X: Type) (R: relation X) (x y z: X),
+  deterministic R -> multi R x y -> multi R x z ->
+    (multi R y z \/ multi R z y).
+Proof.
+  intros. induction H0.
+  - left. assumption.
+  - apply (deterministicStepOrdering1 X R x y z H H0) in H1. inversion H1.
+    + subst. right. eapply multi_step.
+      * apply H0.
+      * assumption.
+    + apply IHmulti in H3. assumption.
+Qed.
+
+Lemma zeroLengthDeterministicLoop: forall (X: Type) (R: relation X) (x y: X),
+  deterministic R -> R x x -> multi R x y -> y = x.
+Proof.
+  unfold deterministic. intros. induction H1.
+  - apply (H x x x) in H0.
+    + assumption.
+    + assumption.
+  - assert (XY: x = y). { apply (H x x y H0) in H1. assumption. }
+    subst. apply IHmulti. assumption.
+Qed.
+
+Theorem deterministicLoopBack: forall (X: Type) (R: relation X) (x y z: X),
+  deterministic R -> R x y -> multi R y x -> multi R x z ->
+    multi R z x.
+Proof.
+  intros. generalize dependent y. induction H2.
+  - intros. apply multi_refl.
+  - intros.
+    assert (y0 = y). {
+      unfold deterministic in H. apply (H x y0 y H1) in H0. assumption.
+    } subst.
+    inversion H3; subst.
+    + apply IHmulti in H1.
+      * assumption.
+      * apply multi_refl.
+    + apply IHmulti in H4.
+      * apply (multi_trans X R z y x H4 H3).
+      * apply (multi_step' X R y0 x y H5 H1).
+Qed.
+
 Definition fullReduce {X: Type} (R: relation X) (startX endX: X) :=
   multi R startX endX /\ finalState R endX.
+
+Theorem infiniteLoop: forall (X: Type) (R: relation X) (x y: X),
+  deterministic R -> R x y -> multi R y x -> ~ exists endX, fullReduce R x endX.
+Proof.
+  intros. unfold fullReduce, finalState.
+  intro Contra. inversion Contra. inversion H2.
+  assert (Loop: multi R x0 x). {
+    apply (deterministicLoopBack X R x y x0 H H0 H1) in H3. apply H3.
+  }
+  inversion Loop; subst.
+  - assert (Y: exists z, R x z). { exists y. assumption. }
+    apply H4 in Y. apply Y.
+  - assert (Y0: exists z, R x0 z). { exists y0. assumption. }
+    apply H4 in Y0. apply Y0.
+Qed.
 
 (* Contexts *******************************************************************)
 
