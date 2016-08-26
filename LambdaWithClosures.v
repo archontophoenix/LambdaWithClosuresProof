@@ -190,10 +190,13 @@ Qed.
 Definition fullReduce {X: Type} (R: relation X) (startX endX: X) :=
   multi R startX endX /\ finalState R endX.
 
+Definition loopsForever {X: Type} (R: relation X) (startX: X) :=
+  ~ exists endX, fullReduce R startX endX.
+
 Theorem infiniteLoop: forall (X: Type) (R: relation X) (x y: X),
-  deterministic R -> R x y -> multi R y x -> ~ exists endX, fullReduce R x endX.
+  deterministic R -> R x y -> multi R y x -> loopsForever R x.
 Proof.
-  intros. unfold fullReduce, finalState.
+  intros. unfold loopsForever, fullReduce, finalState.
   intro Contra. inversion Contra. inversion H2.
   assert (Loop: multi R x0 x). {
     apply (deterministicLoopBack X R x y x0 H H0 H1) in H3. apply H3.
@@ -328,11 +331,10 @@ Example notReduceVar:
 Proof.
   intros Contra. inversion Contra. inversion H.
 Qed.
+Definition applyParmToItself := Lam 0 (App (Var 0) (Var 0)).
+Definition loopApplyingSelfToSelf := App applyParmToItself applyParmToItself.
 Example notReduceInfinite:
-  ~ (exists result,
-      SymReduce
-        (App (Lam 0 (App (Var 0) (Var 0))) (Lam 0 (App (Var 0) (Var 0))))
-        result).
+  ~ (exists result, SymReduce loopApplyingSelfToSelf result).
 Abort. (* Can't figure out how to prove this with big-step reduction. *)
 
 (* Small-step symbolic reduction **********************************************)
@@ -364,6 +366,13 @@ Example notStepVar:
 Proof.
   intros Contra. inversion Contra. inversion H.
 Qed.
+Example symStepAppylingSelfToSelf:
+  SymStep loopApplyingSelfToSelf loopApplyingSelfToSelf.
+Proof.
+  constructor. unfold loopApplyingSelfToSelf. constructor.
+  - constructor.
+  - constructor.
+Qed.
 
 Theorem SymStepDeterministic: deterministic SymStep.
 Proof.
@@ -374,6 +383,15 @@ Proof.
   - inversion H0; subst. eapply SubstDeterministic.
     + apply H.
     + apply H6.
+Qed.
+
+Example infiniteLoopApplyingSelfToSelf:
+  loopsForever SymStep loopApplyingSelfToSelf.
+Proof.
+  eapply infiniteLoop.
+  - apply SymStepDeterministic.
+  - apply symStepAppylingSelfToSelf.
+  - apply multi_refl.
 Qed.
 
 (* DeBruijnization: replacement of symbolic variable names with indices *******)
